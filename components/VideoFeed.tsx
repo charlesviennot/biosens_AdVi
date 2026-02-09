@@ -1,17 +1,18 @@
 import React, { useRef, useEffect, useState } from 'react';
-import { Camera, AlertCircle, ScanFace } from 'lucide-react';
-import { AppState } from '../types';
+import { AlertCircle } from 'lucide-react';
+import { AppState, RGB } from '../types';
 
 interface VideoFeedProps {
-  onFrameProcessed: (greenAverage: number) => void;
+  onFrameProcessed: (rgb: RGB) => void;
   appState: AppState;
 }
 
-export const VideoFeed: React.FC<VideoFeedProps> = ({ onFrameProcessed, appState }) => {
+const VideoFeedComponent: React.FC<VideoFeedProps> = ({ onFrameProcessed, appState }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [error, setError] = useState<string | null>(null);
   const requestRef = useRef<number>();
+  const [isVideoReady, setIsVideoReady] = useState(false);
 
   useEffect(() => {
     const startCamera = async () => {
@@ -20,19 +21,26 @@ export const VideoFeed: React.FC<VideoFeedProps> = ({ onFrameProcessed, appState
           audio: false,
           video: {
             facingMode: 'user',
-            // Prefer portrait resolution for mobile selfie feel
-            width: { ideal: 720 }, 
+            width: { ideal: 720 },
             height: { ideal: 1280 },
             frameRate: { ideal: 30 }
           }
         };
 
         const stream = await navigator.mediaDevices.getUserMedia(constraints);
+        
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
+          // IMPORTANT: iPhone requires the video element to be technically "visible" in the DOM logic
+          // and playsInline set. We handle visibility via CSS opacity/z-index.
+          videoRef.current.onloadedmetadata = () => {
+             videoRef.current?.play().then(() => {
+                 setIsVideoReady(true);
+             }).catch(e => console.error("Play error:", e));
+          };
         }
       } catch (err) {
-        setError("Camera access denied. Please allow camera access in settings.");
+        setError("Camera access denied. Please allow camera access.");
         console.error(err);
       }
     };
@@ -49,41 +57,39 @@ export const VideoFeed: React.FC<VideoFeedProps> = ({ onFrameProcessed, appState
   }, []);
 
   const processFrame = () => {
-    if (!videoRef.current || !canvasRef.current) return;
+    requestRef.current = requestAnimationFrame(processFrame);
+    
+    if (!videoRef.current || !canvasRef.current || !isVideoReady) return;
     
     const video = videoRef.current;
+    // Ensure video is actually playing and has data
+    if (video.readyState < 2 || video.paused) return;
+
     const canvas = canvasRef.current;
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    if (!ctx) return;
 
-    if (!ctx || video.readyState !== 4) {
-      requestRef.current = requestAnimationFrame(processFrame);
-      return;
-    }
-
-    // Ensure canvas always fills the container coordinates
+    // --- CANVAS RESIZING LOGIC ---
     const rect = canvas.parentElement?.getBoundingClientRect();
     if (rect) {
-        if (canvas.width !== rect.width || canvas.height !== rect.height) {
-            canvas.width = rect.width;
-            canvas.height = rect.height;
-        }
+         if (Math.abs(canvas.width - rect.width) > 50 || Math.abs(canvas.height - rect.height) > 50) {
+             canvas.width = rect.width;
+             canvas.height = rect.height;
+         }
     }
 
-    // Draw Video to Canvas (Crop to fit "Object Cover" style)
-    // We need to calculate aspect ratios to center crop the video feed onto the canvas
+    // --- DRAWING LOGIC (ASPECT FILL) ---
     const videoAspect = video.videoWidth / video.videoHeight;
     const canvasAspect = canvas.width / canvas.height;
     
     let renderW, renderH, offsetX, offsetY;
 
     if (canvasAspect > videoAspect) {
-        // Canvas is wider than video -> Fit width, crop height
         renderW = canvas.width;
         renderH = canvas.width / videoAspect;
         offsetX = 0;
         offsetY = (canvas.height - renderH) / 2;
     } else {
-        // Canvas is taller than video (Mobile Portrait) -> Fit height, crop width
         renderH = canvas.height;
         renderW = canvas.height * videoAspect;
         offsetX = (canvas.width - renderW) / 2;
@@ -91,43 +97,58 @@ export const VideoFeed: React.FC<VideoFeedProps> = ({ onFrameProcessed, appState
     }
 
     ctx.save();
-    // Mirror the image horizontally
+    // Mirror
     ctx.translate(canvas.width, 0);
     ctx.scale(-1, 1);
     ctx.drawImage(video, 0, 0, video.videoWidth, video.videoHeight, canvas.width - (offsetX + renderW), offsetY, renderW, renderH);
     ctx.restore();
 
-    // --- ROI EXTRACTION ---
-    // Extract from the visual center of the screen where the oval is
-    const roiW = canvas.width * 0.25;
+    // --- ROI Extraction (Forehead/Cheeks area) ---
+    const roiW = canvas.width * 0.20;
     const roiH = canvas.height * 0.15;
     const roiX = (canvas.width - roiW) / 2;
-    const roiY = (canvas.height * 0.35); // Slightly above center for face
+    const roiY = (canvas.height * 0.30); 
 
-    const frameData = ctx.getImageData(roiX, roiY, roiW, roiH);
-    const data = frameData.data;
-    
-    let greenSum = 0;
-    let count = 0;
-    // Fast Sampling (every 8th pixel)
-    for (let i = 0; i < data.length; i += 32) { 
-      greenSum += data[i + 1];
-      count++;
-    }
+    // Extract data for processing
+    // NOTE: Optimized for performance
+    try {
+        const frameData = ctx.getImageData(roiX, roiY, roiW, roiH);
+        const data = frameData.data;
+        
+        let rSum = 0, gSum = 0, bSum = 0;
+        let count = 0;
+        
+        // Sampling stride 32 for better performance on mobile high-res screens
+        for (let i = 0; i < data.length; i += 32) { 
+          rSum += data[i];
+          gSum += data[i + 1];
+          bSum += data[i + 2];
+          count++;
+        }
 
-    if (count > 0) {
-        onFrameProcessed(greenSum / count);
+        if (count > 0) {
+            onFrameProcessed({
+                r: rSum / count,
+                g: gSum / count,
+                b: bSum / count
+            });
+        }
+    } catch (e) {
+        // Prevent crash if canvas state is invalid
+        console.warn("Frame read error", e);
     }
     
-    // --- VISUAL OVERLAYS ---
+    // --- VISUAL FEEDBACK ---
     if (appState === AppState.MEASURING || appState === AppState.CALIBRATING) {
-        // Scan Effect inside the ROI area
-        ctx.fillStyle = 'rgba(6, 182, 212, 0.1)';
-        const scanY = roiY + (Math.sin(Date.now() / 500) * 0.5 + 0.5) * roiH;
+        ctx.strokeStyle = 'rgba(6, 182, 212, 0.3)';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(roiX, roiY, roiW, roiH);
+        
+        const time = Date.now() / 1000;
+        const scanY = roiY + (Math.sin(time * 2) * 0.5 + 0.5) * roiH;
+        ctx.fillStyle = 'rgba(6, 182, 212, 0.4)';
         ctx.fillRect(roiX, scanY, roiW, 2);
     }
-
-    requestRef.current = requestAnimationFrame(processFrame);
   };
 
   useEffect(() => {
@@ -135,41 +156,48 @@ export const VideoFeed: React.FC<VideoFeedProps> = ({ onFrameProcessed, appState
     return () => {
       if (requestRef.current) cancelAnimationFrame(requestRef.current);
     };
-  }, [appState]);
+  }, [appState, isVideoReady]);
 
   return (
-    <div className="relative w-full h-full bg-slate-900 overflow-hidden">
+    <div className="relative w-full h-full bg-black overflow-hidden">
       {error && (
-        <div className="absolute inset-0 z-50 flex flex-col items-center justify-center bg-black text-white p-8 text-center">
+        <div className="absolute inset-0 z-50 flex flex-col items-center justify-center bg-black/90 text-white p-8 text-center">
           <AlertCircle className="w-12 h-12 mb-4 text-red-500" />
-          <h3 className="text-lg font-bold mb-2">Camera Error</h3>
-          <p className="text-slate-400">{error}</p>
+          <p className="text-slate-300">{error}</p>
         </div>
       )}
       
-      <video ref={videoRef} autoPlay playsInline muted className="hidden" />
-      <canvas ref={canvasRef} className="block w-full h-full" />
+      {/* 
+         FIX: Do NOT use display:none or hidden class. 
+         iOS pauses video decoding if the element is hidden. 
+         Use opacity 0 and absolute positioning instead.
+      */}
+      <video 
+        ref={videoRef} 
+        playsInline 
+        muted 
+        autoPlay
+        style={{ position: 'absolute', opacity: 0, pointerEvents: 'none', zIndex: -1, width: 1, height: 1 }}
+      />
+      
+      <canvas ref={canvasRef} className="block w-full h-full object-cover" />
 
-      {/* FACE OVAL OVERLAY */}
+      {/* OVERLAY GRAPHICS */}
       <div className="absolute inset-0 pointer-events-none">
          <svg width="100%" height="100%">
              <defs>
                  <mask id="overlay-mask">
                      <rect width="100%" height="100%" fill="white" />
-                     {/* The clear hole for the face */}
-                     <ellipse cx="50%" cy="42%" rx="35%" ry="25%" fill="black" />
+                     <ellipse cx="50%" cy="42%" rx="38%" ry="28%" fill="black" />
                  </mask>
              </defs>
-             {/* Darkened background */}
-             <rect width="100%" height="100%" fill="rgba(0,0,0,0.4)" mask="url(#overlay-mask)" />
-             
-             {/* The Ring */}
+             <rect width="100%" height="100%" fill="rgba(0,0,0,0.6)" mask="url(#overlay-mask)" />
              <ellipse 
-                 cx="50%" cy="42%" rx="35%" ry="25%" 
+                 cx="50%" cy="42%" rx="38%" ry="28%" 
                  fill="none" 
-                 stroke={appState === AppState.MEASURING ? "rgba(6, 182, 212, 0.8)" : "rgba(255, 255, 255, 0.3)"} 
+                 stroke={appState === AppState.MEASURING ? "rgba(6, 182, 212, 0.8)" : "rgba(255, 255, 255, 0.2)"} 
                  strokeWidth={appState === AppState.MEASURING ? "3" : "1"}
-                 strokeDasharray={appState === AppState.CALIBRATING ? "10 10" : "0"}
+                 strokeDasharray={appState === AppState.CALIBRATING ? "10 5" : "0"}
                  className="transition-all duration-300"
              />
          </svg>
@@ -177,3 +205,5 @@ export const VideoFeed: React.FC<VideoFeedProps> = ({ onFrameProcessed, appState
     </div>
   );
 };
+
+export const VideoFeed = React.memo(VideoFeedComponent);

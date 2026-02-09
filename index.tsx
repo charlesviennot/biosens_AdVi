@@ -8,8 +8,7 @@ if (!rootElement) {
 }
 
 const root = ReactDOM.createRoot(rootElement);
+// Removed StrictMode to prevent double-invoking effects which can break camera streams on some mobile browsers
 root.render(
-  <React.StrictMode>
     <App />
-  </React.StrictMode>
 );

@@ -12,6 +12,12 @@ export interface SignalDataPoint {
   value: number;
 }
 
+export interface RGB {
+  r: number;
+  g: number;
+  b: number;
+}
+
 export enum AppState {
   IDLE,
   CALIBRATING,
