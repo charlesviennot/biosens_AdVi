@@ -16,6 +16,7 @@ export enum AppState {
   IDLE,
   CALIBRATING,
   MEASURING,
+  REPORT,
   ERROR
 }
 

@@ -1,6 +1,6 @@
 import React, { useRef, useEffect, useState } from 'react';
-import { Camera, RefreshCw, AlertCircle } from 'lucide-react';
-import { AppState, FaceROI } from '../types';
+import { Camera, AlertCircle, ScanFace } from 'lucide-react';
+import { AppState } from '../types';
 
 interface VideoFeedProps {
   onFrameProcessed: (greenAverage: number) => void;
@@ -16,19 +16,23 @@ export const VideoFeed: React.FC<VideoFeedProps> = ({ onFrameProcessed, appState
   useEffect(() => {
     const startCamera = async () => {
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({
+        // Mobile-first constraint (Portrait preference)
+        const constraints = {
+          audio: false,
           video: {
-            width: { ideal: 640 },
-            height: { ideal: 480 },
             facingMode: 'user',
+            width: { ideal: 720 }, // Lower resolution is often better for performance
+            height: { ideal: 1280 },
             frameRate: { ideal: 30 }
           }
-        });
+        };
+
+        const stream = await navigator.mediaDevices.getUserMedia(constraints);
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
         }
       } catch (err) {
-        setError("Camera access denied or unavailable.");
+        setError("Camera access denied.");
         console.error(err);
       }
     };
@@ -56,42 +60,59 @@ export const VideoFeed: React.FC<VideoFeedProps> = ({ onFrameProcessed, appState
       return;
     }
 
-    // Draw video frame
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    if (canvas.width !== video.videoWidth) {
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+    }
 
-    /**
-     * ROI LOGIC:
-     * Ideally, we use MediaPipe FaceMesh here.
-     * For this MVP without external heavy assets, we implement a robust
-     * "Center ROI" heuristic which assumes the user centers their face.
-     * We target the center-upper region (forehead/cheeks approximation).
-     */
+    // Mirror Effect
+    ctx.save();
+    ctx.scale(-1, 1);
+    ctx.drawImage(video, -canvas.width, 0, canvas.width, canvas.height);
+    ctx.restore();
+
+    // ROI Logic (Portrait Optimized)
+    // We want the upper center 
     const roiWidth = canvas.width * 0.3;
-    const roiHeight = canvas.height * 0.3;
+    const roiHeight = canvas.height * 0.25; 
     const roiX = (canvas.width - roiWidth) / 2;
-    const roiY = (canvas.height - roiHeight) / 2.5;
+    const roiY = (canvas.height * 0.2); // approx forehead/eyes area
 
-    // Draw ROI Box
-    ctx.strokeStyle = appState === AppState.MEASURING ? '#10B981' : '#F59E0B'; // Green or Amber
-    ctx.lineWidth = 2;
-    ctx.strokeRect(roiX, roiY, roiWidth, roiHeight);
-
-    // Extract Pixel Data
+    // Extract Data
     const frameData = ctx.getImageData(roiX, roiY, roiWidth, roiHeight);
     const data = frameData.data;
     
     let greenSum = 0;
-    let pixelCount = 0;
-
-    // Iterate pixels (RGBA) - Strided for performance if needed, but modern JS handles this size fine
-    for (let i = 0; i < data.length; i += 4) {
-      // data[i] = R, data[i+1] = G, data[i+2] = B
+    let count = 0;
+    // Stride loop for performance on mobile
+    for (let i = 0; i < data.length; i += 16) { 
       greenSum += data[i + 1];
-      pixelCount++;
+      count++;
     }
 
-    const greenAvg = greenSum / pixelCount;
-    onFrameProcessed(greenAvg);
+    if (count > 0) {
+        onFrameProcessed(greenSum / count);
+    }
+    
+    // VISUALIZATION EFFECTS
+    if (appState === AppState.MEASURING || appState === AppState.CALIBRATING) {
+        // Draw Scan Grid
+        ctx.globalAlpha = 0.2;
+        ctx.fillStyle = '#06b6d4';
+        
+        const time = Date.now() / 1000;
+        const pts = 5;
+        for(let i=0; i<pts; i++) {
+            for(let j=0; j<pts; j++) {
+                const x = roiX + (roiWidth/pts)*i + Math.sin(time*2 + j)*8;
+                const y = roiY + (roiHeight/pts)*j + Math.cos(time*2 + i)*8;
+                ctx.beginPath();
+                ctx.arc(x, y, 2, 0, Math.PI*2);
+                ctx.fill();
+            }
+        }
+        ctx.globalAlpha = 1.0;
+    }
 
     requestRef.current = requestAnimationFrame(processFrame);
   };
@@ -101,47 +122,71 @@ export const VideoFeed: React.FC<VideoFeedProps> = ({ onFrameProcessed, appState
     return () => {
       if (requestRef.current) cancelAnimationFrame(requestRef.current);
     };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [appState]);
 
   return (
-    <div className="relative rounded-2xl overflow-hidden border border-slate-700 bg-black shadow-2xl aspect-video w-full max-w-lg mx-auto">
+    <div className="relative w-full h-full">
       {error && (
         <div className="absolute inset-0 z-50 flex flex-col items-center justify-center bg-slate-900/90 text-red-400 p-6 text-center">
-          <AlertCircle className="w-12 h-12 mb-4" />
-          <p>{error}</p>
+          <AlertCircle className="w-10 h-10 mb-2" />
+          <p className="text-sm">{error}</p>
         </div>
       )}
       
       <video
         ref={videoRef}
         autoPlay
-        playsInline
+        playsInline // CRITICAL FOR IPHONE
         muted
-        className="absolute inset-0 w-full h-full object-cover opacity-60"
+        className="hidden" 
       />
       
       <canvas
         ref={canvasRef}
-        width={640}
-        height={480}
-        className="absolute inset-0 w-full h-full object-cover z-10"
+        className="absolute inset-0 w-full h-full object-cover"
       />
 
-      <div className="absolute bottom-4 left-4 z-20 flex items-center space-x-2 bg-black/60 backdrop-blur px-3 py-1 rounded-full border border-slate-700">
-        <Camera className="w-4 h-4 text-emerald-400" />
-        <span className="text-xs font-mono text-emerald-100">30 FPS | LIVE</span>
-      </div>
+      {/* FACE GUIDE OVERLAY */}
+      <div className="absolute inset-0 pointer-events-none">
+        <svg width="100%" height="100%" preserveAspectRatio="none">
+           <defs>
+             <mask id="face-mask">
+               <rect width="100%" height="100%" fill="white" />
+               {/* Vertical Ellipse for Portrait Mode */}
+               <ellipse cx="50%" cy="40%" rx="35%" ry="28%" fill="black" />
+             </mask>
+           </defs>
+           <rect width="100%" height="100%" fill="rgba(11, 17, 33, 0.7)" mask="url(#face-mask)" />
+           
+           <ellipse 
+             cx="50%" 
+             cy="40%" 
+             rx="35%" 
+             ry="28%" 
+             fill="none" 
+             stroke={appState === AppState.MEASURING ? "rgba(6, 182, 212, 0.6)" : "rgba(255, 255, 255, 0.2)"} 
+             strokeWidth="2"
+             strokeDasharray={appState === AppState.CALIBRATING ? "8 4" : "0"}
+             className="transition-all duration-500"
+           />
+        </svg>
 
-      {appState === AppState.CALIBRATING && (
-        <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/40 backdrop-blur-sm">
-           <div className="flex flex-col items-center animate-pulse">
-             <RefreshCw className="w-10 h-10 text-emerald-400 animate-spin mb-2" />
-             <span className="text-emerald-400 font-bold tracking-wider">CALIBRATING SIGNAL...</span>
-             <span className="text-emerald-400/70 text-sm">Keep still</span>
-           </div>
+        {/* Scan Line */}
+        {(appState === AppState.MEASURING || appState === AppState.CALIBRATING) && (
+            <div className="absolute top-0 left-0 w-full h-full overflow-hidden">
+                <div className="scan-line"></div>
+            </div>
+        )}
+
+        <div className="absolute bottom-8 w-full text-center">
+            {appState === AppState.CALIBRATING && (
+                <span className="text-cyan-400 text-sm font-medium animate-pulse tracking-widest uppercase">Calibrating Lens...</span>
+            )}
+             {appState === AppState.IDLE && (
+                <span className="text-slate-300 text-sm font-medium tracking-wide">Ready</span>
+            )}
         </div>
-      )}
+      </div>
     </div>
   );
 };
