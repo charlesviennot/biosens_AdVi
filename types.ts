@@ -18,6 +18,11 @@ export interface RGB {
   b: number;
 }
 
+export interface FrameResult {
+  rgb: RGB;
+  hasFace: boolean;
+}
+
 export enum AppState {
   IDLE,
   CALIBRATING,

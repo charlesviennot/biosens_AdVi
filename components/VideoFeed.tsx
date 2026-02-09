@@ -1,9 +1,9 @@
 import React, { useRef, useEffect, useState } from 'react';
 import { AlertCircle } from 'lucide-react';
-import { AppState, RGB } from '../types';
+import { AppState, FrameResult } from '../types';
 
 interface VideoFeedProps {
-  onFrameProcessed: (rgb: RGB) => void;
+  onFrameProcessed: (result: FrameResult) => void;
   appState: AppState;
 }
 
@@ -21,9 +21,6 @@ const VideoFeedComponent: React.FC<VideoFeedProps> = ({ onFrameProcessed, appSta
           audio: false,
           video: {
             facingMode: 'user',
-            // Removing specific dimensions to get the native aspect ratio (usually 4:3)
-            // which offers the widest field of view. Specifying 16:9 or 9:16 often 
-            // triggers a hardware crop/zoom on mobile front cameras.
           }
         };
 
@@ -31,8 +28,6 @@ const VideoFeedComponent: React.FC<VideoFeedProps> = ({ onFrameProcessed, appSta
         
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
-          // IMPORTANT: iPhone requires the video element to be technically "visible" in the DOM logic
-          // and playsInline set. We handle visibility via CSS opacity/z-index.
           videoRef.current.onloadedmetadata = () => {
              videoRef.current?.play().then(() => {
                  setIsVideoReady(true);
@@ -62,7 +57,6 @@ const VideoFeedComponent: React.FC<VideoFeedProps> = ({ onFrameProcessed, appSta
     if (!videoRef.current || !canvasRef.current || !isVideoReady) return;
     
     const video = videoRef.current;
-    // Ensure video is actually playing and has data
     if (video.readyState < 2 || video.paused) return;
 
     const canvas = canvasRef.current;
@@ -85,13 +79,11 @@ const VideoFeedComponent: React.FC<VideoFeedProps> = ({ onFrameProcessed, appSta
     let renderW, renderH, offsetX, offsetY;
 
     if (canvasAspect > videoAspect) {
-        // Canvas is wider than video (Desktop/Landscape) -> Fit width
         renderW = canvas.width;
         renderH = canvas.width / videoAspect;
         offsetX = 0;
         offsetY = (canvas.height - renderH) / 2;
     } else {
-        // Canvas is taller than video (Mobile Portrait) -> Fit height
         renderH = canvas.height;
         renderW = canvas.height * videoAspect;
         offsetX = (canvas.width - renderW) / 2;
@@ -99,42 +91,69 @@ const VideoFeedComponent: React.FC<VideoFeedProps> = ({ onFrameProcessed, appSta
     }
 
     ctx.save();
-    // Mirror
     ctx.translate(canvas.width, 0);
     ctx.scale(-1, 1);
     ctx.drawImage(video, 0, 0, video.videoWidth, video.videoHeight, canvas.width - (offsetX + renderW), offsetY, renderW, renderH);
     ctx.restore();
 
-    // --- ROI Extraction (Forehead/Cheeks area) ---
-    // Extract from the rendered coordinates (relative to canvas)
-    // We position the ROI relative to the canvas center
+    // --- ROI Extraction & Skin Detection ---
     const roiW = canvas.width * 0.20;
     const roiH = canvas.height * 0.15;
     const roiX = (canvas.width - roiW) / 2;
-    // Position ROI slightly above center (35% down) to hit forehead/cheeks on a centered face
     const roiY = (canvas.height * 0.35); 
 
-    // Extract data for processing
     try {
         const frameData = ctx.getImageData(roiX, roiY, roiW, roiH);
         const data = frameData.data;
         
         let rSum = 0, gSum = 0, bSum = 0;
-        let count = 0;
+        let skinPixels = 0;
+        let totalSampled = 0;
         
-        // Sampling stride 32 for better performance
+        // Sampling stride 32
         for (let i = 0; i < data.length; i += 32) { 
-          rSum += data[i];
-          gSum += data[i + 1];
-          bSum += data[i + 2];
-          count++;
+          const r = data[i];
+          const g = data[i + 1];
+          const b = data[i + 2];
+          
+          // Basic Skin Detection Rule (Simple RGB)
+          // Skin is generally dominated by Red, and R > G > B
+          // Checks:
+          // 1. R > 95 (Not too dark)
+          // 2. G > 40
+          // 3. R > G and R > B (Red dominance)
+          // 4. |R-G| > 15 (Distinct difference)
+          const isSkin = (r > 95) && (g > 40) && (b > 20) &&
+                         (r > g) && (r > b) &&
+                         (Math.abs(r - g) > 15);
+
+          if (isSkin) {
+             skinPixels++;
+             rSum += r;
+             gSum += g;
+             bSum += b;
+          }
+          totalSampled++;
         }
 
-        if (count > 0) {
+        // We require at least 30% of the ROI to be skin-colored to consider it a valid face
+        // This effectively filters out walls, ceilings, or empty frames.
+        const hasFace = totalSampled > 0 && (skinPixels / totalSampled) > 0.3;
+
+        if (skinPixels > 0) {
             onFrameProcessed({
-                r: rSum / count,
-                g: gSum / count,
-                b: bSum / count
+                rgb: {
+                    r: rSum / skinPixels,
+                    g: gSum / skinPixels,
+                    b: bSum / skinPixels
+                },
+                hasFace
+            });
+        } else {
+             // If no skin pixels at all, report raw average but flag as no face
+             onFrameProcessed({
+                rgb: { r: 0, g: 0, b: 0 },
+                hasFace: false
             });
         }
     } catch (e) {
@@ -170,7 +189,6 @@ const VideoFeedComponent: React.FC<VideoFeedProps> = ({ onFrameProcessed, appSta
         </div>
       )}
       
-      {/* Hidden video element acting as source */}
       <video 
         ref={videoRef} 
         playsInline 
@@ -179,7 +197,6 @@ const VideoFeedComponent: React.FC<VideoFeedProps> = ({ onFrameProcessed, appSta
         style={{ position: 'absolute', opacity: 0, pointerEvents: 'none', zIndex: -1, width: 1, height: 1 }}
       />
       
-      {/* Canvas renders the processed frame */}
       <canvas ref={canvasRef} className="block w-full h-full object-cover" />
 
       {/* OVERLAY GRAPHICS (SVG) */}
@@ -188,14 +205,10 @@ const VideoFeedComponent: React.FC<VideoFeedProps> = ({ onFrameProcessed, appSta
              <defs>
                  <mask id="overlay-mask">
                      <rect width="100%" height="100%" fill="white" />
-                     {/* The clear hole for the face - Adjusted size */}
                      <ellipse cx="50%" cy="45%" rx="36%" ry="26%" fill="black" />
                  </mask>
              </defs>
-             {/* Vignette */}
              <rect width="100%" height="100%" fill="rgba(0,0,0,0.6)" mask="url(#overlay-mask)" />
-             
-             {/* Oval Guide */}
              <ellipse 
                  cx="50%" cy="45%" rx="36%" ry="26%" 
                  fill="none" 

@@ -1,9 +1,9 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react';
-import { Activity, Play, RotateCcw, CheckCircle2, AlertTriangle, Fingerprint } from 'lucide-react';
+import { Activity, Play, RotateCcw, CheckCircle2, AlertTriangle, Fingerprint, UserX } from 'lucide-react';
 import { VideoFeed } from './components/VideoFeed';
 import { SignalChart } from './components/SignalChart';
 import { SignalProcessor } from './services/signalProcessing';
-import { AppState, Biomarkers, SignalDataPoint, RGB } from './types';
+import { AppState, Biomarkers, SignalDataPoint, FrameResult } from './types';
 
 const processor = new SignalProcessor();
 const SCAN_DURATION = 30; 
@@ -13,6 +13,8 @@ const App: React.FC = () => {
   const [signalData, setSignalData] = useState<SignalDataPoint[]>([]);
   const [timeLeft, setTimeLeft] = useState(SCAN_DURATION);
   const [lightingCondition, setLightingCondition] = useState<'good' | 'bad'>('good');
+  const [hasFace, setHasFace] = useState(false);
+  
   const [biomarkers, setBiomarkers] = useState<Biomarkers>({
     bpm: 0, hrv: 0, stress: 0, spo2: 98, respirationRate: 0, confidence: 0
   });
@@ -24,17 +26,20 @@ const App: React.FC = () => {
     let interval: number;
     if (appState === AppState.MEASURING) {
       interval = window.setInterval(() => {
-        setTimeLeft((prev) => {
-          if (prev <= 1) {
-             finishScan();
-             return 0;
-          }
-          return prev - 1;
-        });
+        // Only count down if face is present and signal is good
+        if (hasFace) {
+            setTimeLeft((prev) => {
+            if (prev <= 1) {
+                finishScan();
+                return 0;
+            }
+            return prev - 1;
+            });
+        }
       }, 1000);
     }
     return () => clearInterval(interval);
-  }, [appState]);
+  }, [appState, hasFace]);
 
   const finishScan = () => {
     setAppState(AppState.REPORT);
@@ -50,11 +55,20 @@ const App: React.FC = () => {
   };
 
   // RGB Callback - Memoized to be stable
-  const handleFrameProcessed = useCallback((rgb: RGB) => {
+  const handleFrameProcessed = useCallback((result: FrameResult) => {
+    // Update face status
+    setHasFace(result.hasFace);
+
     if (appState === AppState.IDLE || appState === AppState.REPORT) return;
+    
+    // If no face, do NOT process signal data
+    if (!result.hasFace) {
+        return;
+    }
+
+    const { rgb } = result;
 
     // Lighting check (Green channel brightness)
-    // Adjusted thresholds for broader acceptance
     if (rgb.g < 20 || rgb.g > 250) {
         setLightingCondition('bad');
     } else {
@@ -66,7 +80,6 @@ const App: React.FC = () => {
     frameCountRef.current++;
 
     // PERFORMANCE OPTIMIZATION: Update chart only every 3rd frame (10 FPS visual)
-    // Updating React state every frame (30-60 FPS) causes UI jank on mobile
     if (frameCountRef.current % 3 === 0) {
       const { filtered } = processor.processBuffer();
       if (filtered.length > 0) {
@@ -80,7 +93,7 @@ const App: React.FC = () => {
 
     // State Logic
     if (appState === AppState.CALIBRATING) {
-        // Collect samples for ~3 seconds (assuming ~30fps -> 90 frames)
+        // Collect samples for ~3 seconds
         if (processor.getRawSignal().length > 90) {
            setAppState(AppState.MEASURING);
            setTimeLeft(SCAN_DURATION);
@@ -89,8 +102,9 @@ const App: React.FC = () => {
         // Update live metrics every ~1s (30 frames)
         if (frameCountRef.current % 30 === 0) {
             const { bpm, rmssd, snr } = processor.calculateMetrics(true);
-            const validSNR = snr > 1.1; // Slightly lower threshold for faster feedback
+            const validSNR = snr > 1.1; 
             
+            // Only update UI if we have a somewhat valid reading
             if (validSNR && bpm > 40) {
                 setBiomarkers(prev => ({
                     ...prev,
@@ -115,6 +129,7 @@ const App: React.FC = () => {
     setAppState(AppState.IDLE);
     setSignalData([]);
     setLightingCondition('good');
+    setHasFace(false);
   };
 
   // --- REPORT VIEW ---
@@ -210,14 +225,24 @@ const App: React.FC = () => {
       </nav>
 
       {/* Center Feedback */}
-      <div className="absolute inset-0 z-10 flex flex-col items-center justify-center pointer-events-none">
+      <div className="absolute inset-0 z-10 flex flex-col items-center justify-center pointer-events-none text-center px-6">
           {appState === AppState.CALIBRATING && (
               <div className="bg-black/40 backdrop-blur-md px-6 py-3 rounded-full border border-cyan-500/30 flex flex-col items-center animate-pulse">
                   <span className="text-cyan-400 font-bold tracking-widest uppercase text-xs">Analyzing Light...</span>
               </div>
           )}
           
-          {lightingCondition === 'bad' && appState !== AppState.IDLE && (
+          {/* No Face Warning */}
+          {appState !== AppState.IDLE && !hasFace && (
+              <div className="bg-slate-800/80 backdrop-blur px-6 py-4 rounded-xl flex flex-col items-center space-y-2 border border-orange-500/30">
+                  <UserX className="w-8 h-8 text-orange-400" />
+                  <span className="text-white text-sm font-bold">No Face Detected</span>
+                  <span className="text-slate-300 text-xs">Place your face in the oval</span>
+              </div>
+          )}
+          
+          {/* Lighting Warning (Only if face is detected) */}
+          {hasFace && lightingCondition === 'bad' && appState !== AppState.IDLE && (
                <div className="mt-40 bg-red-500/90 backdrop-blur px-4 py-2 rounded-full flex items-center space-x-2 animate-bounce shadow-lg">
                   <AlertTriangle className="w-4 h-4 text-white" />
                   <span className="text-white text-xs font-bold">Too Dark - Face Light Source</span>
@@ -228,8 +253,8 @@ const App: React.FC = () => {
       {/* Bottom Area */}
       <div className="absolute bottom-0 w-full z-20 pb-safe-bottom px-6 py-10 flex flex-col items-center space-y-8">
         
-        {/* Live Chart */}
-        {(appState === AppState.MEASURING || appState === AppState.CALIBRATING) && (
+        {/* Live Chart - Only show if we have signal */}
+        {(appState === AppState.MEASURING || appState === AppState.CALIBRATING) && hasFace && (
             <div className="w-full max-w-[280px] h-16 opacity-70">
                  <SignalChart data={signalData} />
             </div>
@@ -257,7 +282,7 @@ const App: React.FC = () => {
         )}
 
         {/* Live Metrics */}
-        {appState === AppState.MEASURING && (
+        {appState === AppState.MEASURING && hasFace && (
             <div className="grid grid-cols-2 gap-8 w-full max-w-xs">
                 <div className="flex flex-col items-center">
                     <span className="text-slate-400 text-[10px] uppercase font-bold tracking-widest mb-1">Heart Rate</span>
