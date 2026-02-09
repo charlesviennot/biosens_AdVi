@@ -16,12 +16,12 @@ export const VideoFeed: React.FC<VideoFeedProps> = ({ onFrameProcessed, appState
   useEffect(() => {
     const startCamera = async () => {
       try {
-        // Mobile-first constraint (Portrait preference)
         const constraints = {
           audio: false,
           video: {
             facingMode: 'user',
-            width: { ideal: 720 }, // Lower resolution is often better for performance
+            // Prefer portrait resolution for mobile selfie feel
+            width: { ideal: 720 }, 
             height: { ideal: 1280 },
             frameRate: { ideal: 30 }
           }
@@ -32,7 +32,7 @@ export const VideoFeed: React.FC<VideoFeedProps> = ({ onFrameProcessed, appState
           videoRef.current.srcObject = stream;
         }
       } catch (err) {
-        setError("Camera access denied.");
+        setError("Camera access denied. Please allow camera access in settings.");
         console.error(err);
       }
     };
@@ -60,32 +60,57 @@ export const VideoFeed: React.FC<VideoFeedProps> = ({ onFrameProcessed, appState
       return;
     }
 
-    if (canvas.width !== video.videoWidth) {
-        canvas.width = video.videoWidth;
-        canvas.height = video.videoHeight;
+    // Ensure canvas always fills the container coordinates
+    const rect = canvas.parentElement?.getBoundingClientRect();
+    if (rect) {
+        if (canvas.width !== rect.width || canvas.height !== rect.height) {
+            canvas.width = rect.width;
+            canvas.height = rect.height;
+        }
     }
 
-    // Mirror Effect
+    // Draw Video to Canvas (Crop to fit "Object Cover" style)
+    // We need to calculate aspect ratios to center crop the video feed onto the canvas
+    const videoAspect = video.videoWidth / video.videoHeight;
+    const canvasAspect = canvas.width / canvas.height;
+    
+    let renderW, renderH, offsetX, offsetY;
+
+    if (canvasAspect > videoAspect) {
+        // Canvas is wider than video -> Fit width, crop height
+        renderW = canvas.width;
+        renderH = canvas.width / videoAspect;
+        offsetX = 0;
+        offsetY = (canvas.height - renderH) / 2;
+    } else {
+        // Canvas is taller than video (Mobile Portrait) -> Fit height, crop width
+        renderH = canvas.height;
+        renderW = canvas.height * videoAspect;
+        offsetX = (canvas.width - renderW) / 2;
+        offsetY = 0;
+    }
+
     ctx.save();
+    // Mirror the image horizontally
+    ctx.translate(canvas.width, 0);
     ctx.scale(-1, 1);
-    ctx.drawImage(video, -canvas.width, 0, canvas.width, canvas.height);
+    ctx.drawImage(video, 0, 0, video.videoWidth, video.videoHeight, canvas.width - (offsetX + renderW), offsetY, renderW, renderH);
     ctx.restore();
 
-    // ROI Logic (Portrait Optimized)
-    // We want the upper center 
-    const roiWidth = canvas.width * 0.3;
-    const roiHeight = canvas.height * 0.25; 
-    const roiX = (canvas.width - roiWidth) / 2;
-    const roiY = (canvas.height * 0.2); // approx forehead/eyes area
+    // --- ROI EXTRACTION ---
+    // Extract from the visual center of the screen where the oval is
+    const roiW = canvas.width * 0.25;
+    const roiH = canvas.height * 0.15;
+    const roiX = (canvas.width - roiW) / 2;
+    const roiY = (canvas.height * 0.35); // Slightly above center for face
 
-    // Extract Data
-    const frameData = ctx.getImageData(roiX, roiY, roiWidth, roiHeight);
+    const frameData = ctx.getImageData(roiX, roiY, roiW, roiH);
     const data = frameData.data;
     
     let greenSum = 0;
     let count = 0;
-    // Stride loop for performance on mobile
-    for (let i = 0; i < data.length; i += 16) { 
+    // Fast Sampling (every 8th pixel)
+    for (let i = 0; i < data.length; i += 32) { 
       greenSum += data[i + 1];
       count++;
     }
@@ -94,24 +119,12 @@ export const VideoFeed: React.FC<VideoFeedProps> = ({ onFrameProcessed, appState
         onFrameProcessed(greenSum / count);
     }
     
-    // VISUALIZATION EFFECTS
+    // --- VISUAL OVERLAYS ---
     if (appState === AppState.MEASURING || appState === AppState.CALIBRATING) {
-        // Draw Scan Grid
-        ctx.globalAlpha = 0.2;
-        ctx.fillStyle = '#06b6d4';
-        
-        const time = Date.now() / 1000;
-        const pts = 5;
-        for(let i=0; i<pts; i++) {
-            for(let j=0; j<pts; j++) {
-                const x = roiX + (roiWidth/pts)*i + Math.sin(time*2 + j)*8;
-                const y = roiY + (roiHeight/pts)*j + Math.cos(time*2 + i)*8;
-                ctx.beginPath();
-                ctx.arc(x, y, 2, 0, Math.PI*2);
-                ctx.fill();
-            }
-        }
-        ctx.globalAlpha = 1.0;
+        // Scan Effect inside the ROI area
+        ctx.fillStyle = 'rgba(6, 182, 212, 0.1)';
+        const scanY = roiY + (Math.sin(Date.now() / 500) * 0.5 + 0.5) * roiH;
+        ctx.fillRect(roiX, scanY, roiW, 2);
     }
 
     requestRef.current = requestAnimationFrame(processFrame);
@@ -125,67 +138,41 @@ export const VideoFeed: React.FC<VideoFeedProps> = ({ onFrameProcessed, appState
   }, [appState]);
 
   return (
-    <div className="relative w-full h-full">
+    <div className="relative w-full h-full bg-slate-900 overflow-hidden">
       {error && (
-        <div className="absolute inset-0 z-50 flex flex-col items-center justify-center bg-slate-900/90 text-red-400 p-6 text-center">
-          <AlertCircle className="w-10 h-10 mb-2" />
-          <p className="text-sm">{error}</p>
+        <div className="absolute inset-0 z-50 flex flex-col items-center justify-center bg-black text-white p-8 text-center">
+          <AlertCircle className="w-12 h-12 mb-4 text-red-500" />
+          <h3 className="text-lg font-bold mb-2">Camera Error</h3>
+          <p className="text-slate-400">{error}</p>
         </div>
       )}
       
-      <video
-        ref={videoRef}
-        autoPlay
-        playsInline // CRITICAL FOR IPHONE
-        muted
-        className="hidden" 
-      />
-      
-      <canvas
-        ref={canvasRef}
-        className="absolute inset-0 w-full h-full object-cover"
-      />
+      <video ref={videoRef} autoPlay playsInline muted className="hidden" />
+      <canvas ref={canvasRef} className="block w-full h-full" />
 
-      {/* FACE GUIDE OVERLAY */}
+      {/* FACE OVAL OVERLAY */}
       <div className="absolute inset-0 pointer-events-none">
-        <svg width="100%" height="100%" preserveAspectRatio="none">
-           <defs>
-             <mask id="face-mask">
-               <rect width="100%" height="100%" fill="white" />
-               {/* Vertical Ellipse for Portrait Mode */}
-               <ellipse cx="50%" cy="40%" rx="35%" ry="28%" fill="black" />
-             </mask>
-           </defs>
-           <rect width="100%" height="100%" fill="rgba(11, 17, 33, 0.7)" mask="url(#face-mask)" />
-           
-           <ellipse 
-             cx="50%" 
-             cy="40%" 
-             rx="35%" 
-             ry="28%" 
-             fill="none" 
-             stroke={appState === AppState.MEASURING ? "rgba(6, 182, 212, 0.6)" : "rgba(255, 255, 255, 0.2)"} 
-             strokeWidth="2"
-             strokeDasharray={appState === AppState.CALIBRATING ? "8 4" : "0"}
-             className="transition-all duration-500"
-           />
-        </svg>
-
-        {/* Scan Line */}
-        {(appState === AppState.MEASURING || appState === AppState.CALIBRATING) && (
-            <div className="absolute top-0 left-0 w-full h-full overflow-hidden">
-                <div className="scan-line"></div>
-            </div>
-        )}
-
-        <div className="absolute bottom-8 w-full text-center">
-            {appState === AppState.CALIBRATING && (
-                <span className="text-cyan-400 text-sm font-medium animate-pulse tracking-widest uppercase">Calibrating Lens...</span>
-            )}
-             {appState === AppState.IDLE && (
-                <span className="text-slate-300 text-sm font-medium tracking-wide">Ready</span>
-            )}
-        </div>
+         <svg width="100%" height="100%">
+             <defs>
+                 <mask id="overlay-mask">
+                     <rect width="100%" height="100%" fill="white" />
+                     {/* The clear hole for the face */}
+                     <ellipse cx="50%" cy="42%" rx="35%" ry="25%" fill="black" />
+                 </mask>
+             </defs>
+             {/* Darkened background */}
+             <rect width="100%" height="100%" fill="rgba(0,0,0,0.4)" mask="url(#overlay-mask)" />
+             
+             {/* The Ring */}
+             <ellipse 
+                 cx="50%" cy="42%" rx="35%" ry="25%" 
+                 fill="none" 
+                 stroke={appState === AppState.MEASURING ? "rgba(6, 182, 212, 0.8)" : "rgba(255, 255, 255, 0.3)"} 
+                 strokeWidth={appState === AppState.MEASURING ? "3" : "1"}
+                 strokeDasharray={appState === AppState.CALIBRATING ? "10 10" : "0"}
+                 className="transition-all duration-300"
+             />
+         </svg>
       </div>
     </div>
   );
