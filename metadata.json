@@ -1,0 +1,7 @@
+{
+  "name": "BioSense rPPG",
+  "description": "Real-time remote photoplethysmography application for monitoring heart rate, HRV, and stress levels using computer vision.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
