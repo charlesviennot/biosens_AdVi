@@ -21,9 +21,9 @@ const VideoFeedComponent: React.FC<VideoFeedProps> = ({ onFrameProcessed, appSta
           audio: false,
           video: {
             facingMode: 'user',
-            width: { ideal: 720 },
-            height: { ideal: 1280 },
-            frameRate: { ideal: 30 }
+            // Removing specific dimensions to get the native aspect ratio (usually 4:3)
+            // which offers the widest field of view. Specifying 16:9 or 9:16 often 
+            // triggers a hardware crop/zoom on mobile front cameras.
           }
         };
 
@@ -85,11 +85,13 @@ const VideoFeedComponent: React.FC<VideoFeedProps> = ({ onFrameProcessed, appSta
     let renderW, renderH, offsetX, offsetY;
 
     if (canvasAspect > videoAspect) {
+        // Canvas is wider than video (Desktop/Landscape) -> Fit width
         renderW = canvas.width;
         renderH = canvas.width / videoAspect;
         offsetX = 0;
         offsetY = (canvas.height - renderH) / 2;
     } else {
+        // Canvas is taller than video (Mobile Portrait) -> Fit height
         renderH = canvas.height;
         renderW = canvas.height * videoAspect;
         offsetX = (canvas.width - renderW) / 2;
@@ -104,13 +106,15 @@ const VideoFeedComponent: React.FC<VideoFeedProps> = ({ onFrameProcessed, appSta
     ctx.restore();
 
     // --- ROI Extraction (Forehead/Cheeks area) ---
+    // Extract from the rendered coordinates (relative to canvas)
+    // We position the ROI relative to the canvas center
     const roiW = canvas.width * 0.20;
     const roiH = canvas.height * 0.15;
     const roiX = (canvas.width - roiW) / 2;
-    const roiY = (canvas.height * 0.30); 
+    // Position ROI slightly above center (35% down) to hit forehead/cheeks on a centered face
+    const roiY = (canvas.height * 0.35); 
 
     // Extract data for processing
-    // NOTE: Optimized for performance
     try {
         const frameData = ctx.getImageData(roiX, roiY, roiW, roiH);
         const data = frameData.data;
@@ -118,7 +122,7 @@ const VideoFeedComponent: React.FC<VideoFeedProps> = ({ onFrameProcessed, appSta
         let rSum = 0, gSum = 0, bSum = 0;
         let count = 0;
         
-        // Sampling stride 32 for better performance on mobile high-res screens
+        // Sampling stride 32 for better performance
         for (let i = 0; i < data.length; i += 32) { 
           rSum += data[i];
           gSum += data[i + 1];
@@ -134,7 +138,6 @@ const VideoFeedComponent: React.FC<VideoFeedProps> = ({ onFrameProcessed, appSta
             });
         }
     } catch (e) {
-        // Prevent crash if canvas state is invalid
         console.warn("Frame read error", e);
     }
     
@@ -167,11 +170,7 @@ const VideoFeedComponent: React.FC<VideoFeedProps> = ({ onFrameProcessed, appSta
         </div>
       )}
       
-      {/* 
-         FIX: Do NOT use display:none or hidden class. 
-         iOS pauses video decoding if the element is hidden. 
-         Use opacity 0 and absolute positioning instead.
-      */}
+      {/* Hidden video element acting as source */}
       <video 
         ref={videoRef} 
         playsInline 
@@ -180,20 +179,25 @@ const VideoFeedComponent: React.FC<VideoFeedProps> = ({ onFrameProcessed, appSta
         style={{ position: 'absolute', opacity: 0, pointerEvents: 'none', zIndex: -1, width: 1, height: 1 }}
       />
       
+      {/* Canvas renders the processed frame */}
       <canvas ref={canvasRef} className="block w-full h-full object-cover" />
 
-      {/* OVERLAY GRAPHICS */}
+      {/* OVERLAY GRAPHICS (SVG) */}
       <div className="absolute inset-0 pointer-events-none">
          <svg width="100%" height="100%">
              <defs>
                  <mask id="overlay-mask">
                      <rect width="100%" height="100%" fill="white" />
-                     <ellipse cx="50%" cy="42%" rx="38%" ry="28%" fill="black" />
+                     {/* The clear hole for the face - Adjusted size */}
+                     <ellipse cx="50%" cy="45%" rx="36%" ry="26%" fill="black" />
                  </mask>
              </defs>
+             {/* Vignette */}
              <rect width="100%" height="100%" fill="rgba(0,0,0,0.6)" mask="url(#overlay-mask)" />
+             
+             {/* Oval Guide */}
              <ellipse 
-                 cx="50%" cy="42%" rx="38%" ry="28%" 
+                 cx="50%" cy="45%" rx="36%" ry="26%" 
                  fill="none" 
                  stroke={appState === AppState.MEASURING ? "rgba(6, 182, 212, 0.8)" : "rgba(255, 255, 255, 0.2)"} 
                  strokeWidth={appState === AppState.MEASURING ? "3" : "1"}
